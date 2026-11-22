@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import { auditRepo, type AuditReport } from '@nirajsatam/git-commit-audit';
+import { auditRepo, evaluateCommits, type AuditReport, type CommitRecord } from '@nirajsatam/git-commit-audit';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
@@ -41,6 +41,58 @@ export async function POST(request: NextRequest) {
         report.repoPath = cleanUrl;
         return NextResponse.json(report, { status: 200 });
       } catch (cloneErr: unknown) {
+        try {
+          const match = cleanUrl.match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
+          if (match) {
+            const [, owner, repo] = match;
+            const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=${limit}`, {
+              headers: {
+                'User-Agent': 'RepoPulse-Dashboard',
+                'Accept': 'application/vnd.github.v3+json'
+              }
+            });
+
+            if (!res.ok) {
+              const errBody = (await res.json().catch(() => ({}))) as { message?: string };
+              throw new Error(errBody.message || `GitHub API responded with status ${res.status}`);
+            }
+
+            const data = (await res.json()) as Array<{
+              sha: string;
+              commit?: {
+                message?: string;
+                author?: { name?: string; email?: string; date?: string };
+              };
+              author?: { login?: string };
+            }>;
+
+            const commits: CommitRecord[] = data.map((item) => {
+              const fullMsg = item.commit?.message || '';
+              const subject = fullMsg.split('\n')[0].trim();
+              return {
+                hash: item.sha,
+                shortHash: item.sha.slice(0, 7),
+                author: item.commit?.author?.name || item.author?.login || 'Unknown',
+                email: item.commit?.author?.email || '',
+                date: item.commit?.author?.date || new Date().toISOString(),
+                subject,
+                filesChanged: 0,
+                insertions: 0,
+                deletions: 0
+              };
+            });
+
+            const report = evaluateCommits(cleanUrl, commits, { maxCommits: limit });
+            return NextResponse.json(report, { status: 200 });
+          }
+        } catch (apiErr: unknown) {
+          const apiMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+          return NextResponse.json(
+            { error: `Failed to clone or fetch repository: ${apiMsg}` },
+            { status: 400 }
+          );
+        }
+
         const message = cloneErr instanceof Error ? cloneErr.message : String(cloneErr);
         return NextResponse.json(
           { error: `Failed to clone or analyze remote repository: ${message}` },

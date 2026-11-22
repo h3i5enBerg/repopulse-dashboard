@@ -23,6 +23,8 @@ import {
 function GithubIcon({ className = 'w-4 h-4' }: { className?: string }) {
   return (
     <svg
+      width={20}
+      height={20}
       role="img"
       viewBox="0 0 24 24"
       fill="currentColor"
