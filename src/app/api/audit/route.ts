@@ -1,0 +1,81 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import { auditRepo, type AuditReport } from '@nirajsatam/git-commit-audit';
+
+export const runtime = 'nodejs';
+export const maxDuration = 30;
+
+const GITHUB_HTTPS_REGEX = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\.git)?\/?$/;
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const rawTarget = typeof body.target === 'string' ? body.target.trim() : '';
+
+    if (!rawTarget) {
+      return NextResponse.json(
+        { error: 'Repository target is required. Provide a GitHub HTTPS URL or local directory path.' },
+        { status: 400 }
+      );
+    }
+
+    const rawMax = Number(body.maxCommits);
+    const limit = Math.max(5, Math.min(50, !isNaN(rawMax) && rawMax > 0 ? Math.floor(rawMax) : 30));
+
+    if (GITHUB_HTTPS_REGEX.test(rawTarget)) {
+      const cleanUrl = rawTarget.replace(/\/+$/, '');
+      const tmpDir = path.join(os.tmpdir(), `repopulse-${crypto.randomUUID()}`);
+
+      try {
+        execFileSync('git', ['clone', '--depth', String(limit), '--single-branch', cleanUrl, tmpDir], {
+          timeout: 15000,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        const report: AuditReport = auditRepo(tmpDir, { maxCommits: limit });
+        report.repoPath = cleanUrl;
+        return NextResponse.json(report, { status: 200 });
+      } catch (cloneErr: unknown) {
+        const message = cloneErr instanceof Error ? cloneErr.message : String(cloneErr);
+        return NextResponse.json(
+          { error: `Failed to clone or analyze remote repository: ${message}` },
+          { status: 400 }
+        );
+      } finally {
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+        }
+      }
+    }
+
+    if (process.env.NODE_ENV === 'production') {
+      return NextResponse.json(
+        { error: 'Local repository paths are disabled in production. Please enter a public GitHub URL (e.g. https://github.com/owner/repo).' },
+        { status: 400 }
+      );
+    }
+
+    const resolvedPath = path.resolve(process.cwd(), rawTarget);
+    if (!fs.existsSync(resolvedPath)) {
+      return NextResponse.json(
+        { error: `Local path does not exist: ${resolvedPath}` },
+        { status: 400 }
+      );
+    }
+
+    const report: AuditReport = auditRepo(resolvedPath, { maxCommits: limit });
+    return NextResponse.json(report, { status: 200 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      { error: `Audit process failed: ${message}` },
+      { status: 500 }
+    );
+  }
+}
